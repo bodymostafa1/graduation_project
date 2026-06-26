@@ -1,0 +1,178 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="EV Charging Optimization System — Find the fastest and closest available charging stations for your electric vehicle in Egypt.">
+    <title>⚡ EV Charging Optimization System</title>
+
+    <!-- Mapbox GL JS -->
+    <link href="https://api.mapbox.com/mapbox-gl-js/v3.9.4/mapbox-gl.css" rel="stylesheet">
+    <script src="https://api.mapbox.com/mapbox-gl-js/v3.9.4/mapbox-gl.js"></script>
+    
+    <!-- Mapbox Geocoder -->
+    <script src="https://api.mapbox.com/mapbox-gl-js/plugins/mapbox-gl-geocoder/v5.0.0/mapbox-gl-geocoder.min.js"></script>
+    <link rel="stylesheet" href="https://api.mapbox.com/mapbox-gl-js/plugins/mapbox-gl-geocoder/v5.0.0/mapbox-gl-geocoder.css" type="text/css">
+    
+    <!-- Chart.js -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+
+    <!-- Turf.js for Geospatial (Isochrones) -->
+    <script src="https://cdn.jsdelivr.net/npm/@turf/turf@6/turf.min.js"></script>
+
+    <!-- App CSS -->
+    <link rel="stylesheet" href="/static/css/style.css?v=4">
+
+    <!-- Favicon -->
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⚡</text></svg>">
+</head>
+<body>
+
+<div class="app-container">
+    
+    <!-- ═══════════ MAIN MAP ═══════════ -->
+    <div id="map"></div>
+
+    <!-- ═══════════ TOP SEARCH BAR ═══════════ -->
+    <div class="top-search-bar" id="top-search-bar">
+        <div id="geocoder-container"></div>
+        <button id="geolocate-btn-top" class="top-icon-btn" title="Auto-Detect Location">
+            <span class="icon">🧭</span>
+        </button>
+    </div>
+
+    <!-- ═══════════ FLOATING HUD SIDEBAR ═══════════ -->
+    <aside class="sidebar-hud" id="sidebar">
+        <!-- Title -->
+        <div class="app-title">
+            <h1>EV Optimizer</h1>
+            <p>Aviation-Grade Routing</p>
+        </div>
+
+        <button class="toggle-sidebar" id="toggle-sidebar-btn" title="Toggle Sidebar">≡</button>
+
+        <div class="sidebar-content" id="sidebar-content">
+            <!-- Layers Toggle -->
+            <div class="group-box">
+                <div class="group-box-title"><span class="icon">🌍</span> Map Layers</div>
+                <div class="toggle-row">
+                    <label class="switch">
+                        <input type="checkbox" id="heatmap-toggle">
+                        <span class="slider round"></span>
+                    </label>
+                    <span class="toggle-label">Station Heatmap</span>
+                </div>
+            </div>
+
+            <!-- Vehicle Group -->
+            <div class="group-box">
+                <div class="group-box-title"><span class="icon">🚗</span> Vehicle Specs</div>
+                <div class="form-group">
+                    <label class="form-label" for="brand-select">Brand</label>
+                    <select id="brand-select"></select>
+                </div>
+                <div class="form-group">
+                    <label class="form-label" for="model-select">Model</label>
+                    <select id="model-select"></select>
+                </div>
+                <div class="form-group">
+                    <label class="form-label" for="battery-size-select">Battery Size</label>
+                    <select id="battery-size-select"></select>
+                </div>
+            </div>
+
+            <!-- Battery Group -->
+            <div class="group-box">
+                <div class="group-box-title"><span class="icon">🔋</span> Battery State</div>
+                <div class="form-group">
+                    <div class="slider-row">
+                        <label class="form-label">Current Charge</label>
+                        <span class="slider-value" id="bat-val">20%</span>
+                    </div>
+                    <input type="range" id="bat-slider" class="modern-slider" min="1" max="100" value="20">
+                </div>
+                <div class="form-group">
+                    <div class="slider-row">
+                        <label class="form-label">Target Charge</label>
+                        <span class="slider-value" id="tgt-val">80%</span>
+                    </div>
+                    <input type="range" id="tgt-slider" class="modern-slider" min="1" max="100" value="80">
+                </div>
+            </div>
+
+            <!-- Charger Preference -->
+            <div class="group-box">
+                <div class="group-box-title"><span class="icon">🔌</span> Network Preference</div>
+                <div class="form-group">
+                    <select id="charger-pref">
+                        <option value="Any">Any Charger Type</option>
+                        <option value="AC">AC Slow Only</option>
+                        <option value="DC">DC Fast Only</option>
+                    </select>
+                </div>
+            </div>
+
+            <!-- Location -->
+            <div class="group-box">
+                <div class="group-box-title"><span class="icon">📍</span> Origin</div>
+                <div class="radio-group-modern" style="margin-bottom: 8px;">
+                    <span style="font-size: 13px; color: var(--muted-foreground);">Search top bar or Right-click map</span>
+                </div>
+
+                <div class="loc-status warn" id="loc-status">Awaiting location...</div>
+            </div>
+
+            <!-- Run Button -->
+            <button class="btn-primary-glow" id="run-btn">
+                <span class="btn-text">Compute Optimal Route</span>
+                <span class="btn-glow"></span>
+            </button>
+        </div>
+    </aside>
+
+    <!-- Loading Spinner -->
+    <div class="spinner-overlay" id="spinner">
+        <div class="spinner"></div>
+        <div class="spinner-text">Running Optimization Algorithms...</div>
+    </div>
+
+    <!-- ═══════════ BOTTOM ANALYTICS DRAWER ═══════════ -->
+    <div class="bottom-drawer" id="bottom-drawer">
+        <div class="drawer-header">
+            <div class="drawer-drag-handle"></div>
+            <div class="drawer-title-row">
+                <h2>Optimization Analytics</h2>
+                <button class="btn-icon" id="close-drawer-btn">✖</button>
+            </div>
+            <div class="summary-bar" id="summary-bar"></div>
+        </div>
+
+        <div class="drawer-content">
+            
+            <!-- Fastest Category (Left) -->
+            <div class="drawer-category-area" id="fastest-area">
+                <div class="category-header" style="color: var(--brand-cyan);">
+                    <span class="icon">⚡</span> Fastest Charging
+                </div>
+                <div class="cards-container" id="fastest-cards"></div>
+            </div>
+
+            <!-- Closest Category (Right) -->
+            <div class="drawer-category-area" id="closest-area">
+                <div class="category-header" style="color: var(--brand-rose);">
+                    <span class="icon">📍</span> Closest Distance
+                </div>
+                <div class="cards-container" id="closest-cards"></div>
+            </div>
+
+        </div>
+    </div>
+</div>
+
+<!-- Pass Mapbox token from server -->
+<script>
+    window.MAPBOX_TOKEN = "{{ mapbox_token }}";
+</script>
+<script src="/static/js/app.js?v=4"></script>
+</body>
+</html>
