@@ -7,7 +7,7 @@ from typing import Optional
 from datetime import datetime
 
 from state import app_state
-from engine import simulation_engine
+from engine import simulation_engine, fetch_mapbox_route, update_station_road_metrics
 import math
 import pandas as pd
 
@@ -153,17 +153,43 @@ async def run_simulation(req: SimulationRequest):
             "available_energy": available_energy,
         }
 
-    fastest = available.sort_values('best_total_time').head(1)
-    closest = available.sort_values('distance_to_user').head(1)
-
-    import pandas as pd
-    top = pd.concat([fastest, closest]).drop_duplicates(subset=['Station ID'])
-
     def normalize_sid(sid_val):
         s = str(sid_val)
         if s.endswith('.0'):
             return s[:-2]
         return s
+
+    # Final Guarantee in api.py: Ensure that winners are stably sorted and
+    # definitely have their Mapbox road routes fetched and updated.
+    for _ in range(5):
+        available = result_df[result_df['has_available'] == True]
+        if available.empty:
+            break
+        fastest = available.sort_values(by=['best_total_time', 'Station ID']).head(1)
+        closest = available.sort_values(by=['distance_to_user', 'Station ID']).head(1)
+        top = pd.concat([fastest, closest]).drop_duplicates(subset=['Station ID'])
+        
+        needs_fetch = [
+            row for _, row in top.iterrows()
+            if normalize_sid(row['Station ID']) not in app_state.station_routes
+        ]
+        if not needs_fetch:
+            break
+            
+        for row in needs_fetch:
+            sid = row['Station ID']
+            norm_sid = normalize_sid(sid)
+            result = fetch_mapbox_route(req.user_lat, req.user_lon, row['Latitude'], row['Longitude'])
+            if result:
+                road_dist_km, new_drive_time, coords = result
+                app_state.station_routes[norm_sid] = coords
+                result_df = update_station_road_metrics(result_df, sid, road_dist_km, new_drive_time)
+
+    # Re-calculate top one final time after any potential fetches
+    available = result_df[result_df['has_available'] == True]
+    fastest = available.sort_values(by=['best_total_time', 'Station ID']).head(1)
+    closest = available.sort_values(by=['distance_to_user', 'Station ID']).head(1)
+    top = pd.concat([fastest, closest]).drop_duplicates(subset=['Station ID'])
 
     def safe_float(v):
         if pd.isna(v) or v is None:

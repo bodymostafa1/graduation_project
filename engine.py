@@ -20,6 +20,98 @@ def normalize_sid(sid_val):
         return s[:-2]
     return s
 
+
+def fetch_mapbox_route(user_lat, user_lon, s_lat, s_lon, retries=2):
+    """Fetch a Mapbox route with retry. Returns (dist_km, dur_hrs, coords) or None."""
+    MAPBOX_TOKEN = os.getenv("MAPBOX_SECRET_TOKEN", "")
+    print(f"--> Attempting to fetch Mapbox route to destination ({s_lat}, {s_lon}) from ({user_lat}, {user_lon})", flush=True)
+    for attempt in range(retries + 1):
+        try:
+            url = (
+                f"https://api.mapbox.com/directions/v5/mapbox/driving/"
+                f"{user_lon},{user_lat};{s_lon},{s_lat}"
+                f"?overview=full&geometries=geojson&access_token={MAPBOX_TOKEN}"
+            )
+            response = requests.get(url, timeout=10)
+            
+            if response.status_code != 200:
+                print(f"[Attempt {attempt+1}] Mapbox HTTP Error {response.status_code}: {response.text}", flush=True)
+                continue
+                
+            res = response.json()
+            if res.get('code') == 'Ok' and res.get('routes'):
+                route = res['routes'][0]
+                dist_km = route['distance'] / 1000.0
+                dur_hrs = route['duration'] / 3600.0
+                coords = [[c[1], c[0]] for c in route['geometry']['coordinates']]
+                print(f"    SUCCESS: Fetched route, distance={dist_km:.2f}km, duration={dur_hrs:.2f}hrs", flush=True)
+                return dist_km, dur_hrs, coords
+            else:
+                print(f"[Attempt {attempt+1}] Mapbox API Error Code: {res.get('code')}, Message: {res.get('message', 'None')}", flush=True)
+        except Exception as e:
+            print(f"[Attempt {attempt+1}] Exception during route fetch: {repr(e)}", flush=True)
+    
+    print(f"    FAILED to fetch Mapbox route for dest({s_lat}, {s_lon}) after {retries + 1} attempts.", flush=True)
+    return None
+
+
+def select_winners(df):
+    """Select the fastest and closest available stations from the dataframe using stable sorting."""
+    available = df[df['has_available'] == True]
+    if available.empty:
+        return pd.DataFrame()
+    fastest = available.sort_values(by=['best_total_time', 'Station ID']).head(1)
+    closest = available.sort_values(by=['distance_to_user', 'Station ID']).head(1)
+    return pd.concat([fastest, closest]).drop_duplicates(subset=['Station ID'])
+
+
+def update_station_road_metrics(df, sid, road_dist_km, new_drive_time):
+    """Updates a station's distance, drive time, charge time, total time, and cost in the dataframe."""
+    consumption = app_state.consumption
+    available_energy = app_state.available_energy
+    target_energy = app_state.target_energy if app_state.target_energy > 0 else app_state.battery_cap
+
+    new_req_kwh = road_dist_km * (consumption / 100.0)
+    new_rem_kwh = available_energy - new_req_kwh
+    new_charge_kwh = max(0, target_energy - new_rem_kwh)
+
+    mask = df['Station ID'] == sid
+    if not mask.any():
+        return df
+
+    df.loc[mask, 'distance_to_user'] = road_dist_km
+    df.loc[mask, 'drive_time_hours'] = new_drive_time
+    df.loc[mask, 'required_kwh'] = new_req_kwh
+
+    # Recalculate times and costs with new road values
+    ac_mask = mask & (df['ac_working'] > 0)
+    dc_mask = mask & (df['dc_working'] > 0)
+    if ac_mask.any():
+        ac_spd = df.loc[ac_mask, 'ac_charging_speed'].values[0]
+        new_ac_ct = new_charge_kwh / ac_spd if ac_spd > 0 else 0
+        df.loc[ac_mask, 'ac_charge_time'] = new_ac_ct
+        df.loc[ac_mask, 'ac_total_time'] = new_drive_time + new_ac_ct
+        df.loc[ac_mask, 'ac_charge_cost'] = new_charge_kwh * PRICE_AC_PER_KWH
+    if dc_mask.any():
+        dc_spd = df.loc[dc_mask, 'dc_charging_speed'].values[0]
+        new_dc_ct = new_charge_kwh / dc_spd if dc_spd > 0 else 0
+        df.loc[dc_mask, 'dc_charge_time'] = new_dc_ct
+        df.loc[dc_mask, 'dc_total_time'] = new_drive_time + new_dc_ct
+        df.loc[dc_mask, 'dc_charge_cost'] = new_charge_kwh * PRICE_DC_PER_KWH
+
+    # Recalculate best_total_time
+    row_data = df.loc[mask].iloc[0]
+    best = float('inf')
+    if row_data['ac_avail'] > 0 and row_data['ac_total_time'] < best:
+        best = row_data['ac_total_time']
+    if row_data['dc_avail'] > 0 and row_data['dc_total_time'] < best:
+        best = row_data['dc_total_time']
+    if best < float('inf'):
+        df.loc[mask, 'best_total_time'] = best
+    
+    return df
+
+
 def simulation_engine(stations_df, current_hour, user_lat, user_lon, max_range_km):
     """The core probabilistic logic to prepare variables for the Math Model."""
     np.random.seed(42)
@@ -71,45 +163,13 @@ def simulation_engine(stations_df, current_hour, user_lat, user_lon, max_range_k
     )
     top_station_ids = set(unique_closest.index)
 
-    def _fetch_mapbox_route(s_lon, s_lat, retries=2):
-        """Fetch a Mapbox route with retry.  Returns (dist_km, dur_hrs, coords) or None."""
-        print(f"--> Attempting to fetch Mapbox route to destination ({s_lat}, {s_lon})", flush=True)
-        for attempt in range(retries + 1):
-            try:
-                url = (
-                    f"https://api.mapbox.com/directions/v5/mapbox/driving/"
-                    f"{user_lon},{user_lat};{s_lon},{s_lat}"
-                    f"?overview=full&geometries=geojson&access_token={MAPBOX_TOKEN}"
-                )
-                response = requests.get(url, timeout=10)
-                
-                if response.status_code != 200:
-                    print(f"[Attempt {attempt+1}] Mapbox HTTP Error {response.status_code}: {response.text}", flush=True)
-                    continue
-                    
-                res = response.json()
-                if res.get('code') == 'Ok' and res.get('routes'):
-                    route = res['routes'][0]
-                    dist_km = route['distance'] / 1000.0
-                    dur_hrs = route['duration'] / 3600.0
-                    coords = [[c[1], c[0]] for c in route['geometry']['coordinates']]
-                    print(f"    SUCCESS: Fetched route, distance={dist_km:.2f}km, duration={dur_hrs:.2f}hrs", flush=True)
-                    return dist_km, dur_hrs, coords
-                else:
-                    print(f"[Attempt {attempt+1}] Mapbox API Error Code: {res.get('code')}, Message: {res.get('message', 'None')}", flush=True)
-            except Exception as e:
-                print(f"[Attempt {attempt+1}] Exception during route fetch: {repr(e)}", flush=True)
-        
-        print(f"    FAILED to fetch Mapbox route for dest({s_lat}, {s_lon}) after {retries + 1} attempts, falling back to Haversine.", flush=True)
-        return None
-
     app_state.station_routes = {}
 
     # Fetch once per unique station, then broadcast to all its rows (AC, DC, etc.)
     for sid in top_station_ids:
         rows_mask = station_stats['Station ID'] == sid
         sample = station_stats.loc[rows_mask].iloc[0]
-        result = _fetch_mapbox_route(sample['Longitude'], sample['Latitude'])
+        result = fetch_mapbox_route(user_lat, user_lon, sample['Latitude'], sample['Longitude'])
         if result:
             dist_km, dur_hrs, coords = result
             station_stats.loc[rows_mask, 'distance_to_user'] = dist_km
@@ -244,14 +304,9 @@ def simulation_engine(stations_df, current_hour, user_lat, user_lon, max_range_k
     #    (always longer than Haversine), which can shift the winners, so we
     #    keep going until stable (max 10 rounds to avoid infinite loops).
     for _round in range(10):
-        available_merged = result_df[result_df['has_available'] == True]
-        if available_merged.empty:
+        candidates = select_winners(result_df)
+        if candidates.empty:
             break
-
-        candidates = pd.concat([
-            available_merged.nsmallest(1, 'best_total_time'),
-            available_merged.nsmallest(1, 'distance_to_user')
-        ]).drop_duplicates(subset=['Station ID'])
 
         # Check if all current winners already have routes
         needs_fetch = [
@@ -263,96 +318,24 @@ def simulation_engine(stations_df, current_hour, user_lat, user_lon, max_range_k
 
         for cand in needs_fetch:
             sid = cand['Station ID']
-            result = _fetch_mapbox_route(cand['Longitude'], cand['Latitude'])
+            result = fetch_mapbox_route(user_lat, user_lon, cand['Latitude'], cand['Longitude'])
             if result:
                 road_dist_km, new_drive_time, coords = result
                 app_state.station_routes[normalize_sid(sid)] = coords
-                # Update distance/duration/required_kwh with real road values
-                new_req_kwh = road_dist_km * (consumption / 100.0)
-                new_rem_kwh = available_energy - new_req_kwh
-                new_charge_kwh = max(0, target_energy - new_rem_kwh)
-
-                mask = result_df['Station ID'] == sid
-                result_df.loc[mask, 'distance_to_user'] = road_dist_km
-                result_df.loc[mask, 'drive_time_hours'] = new_drive_time
-                result_df.loc[mask, 'required_kwh'] = new_req_kwh
-
-                # Recalculate times and costs with new road values
-                ac_mask = mask & (result_df['ac_working'] > 0)
-                dc_mask = mask & (result_df['dc_working'] > 0)
-                if ac_mask.any():
-                    ac_spd = result_df.loc[ac_mask, 'ac_charging_speed'].values[0]
-                    new_ac_ct = new_charge_kwh / ac_spd if ac_spd > 0 else 0
-                    result_df.loc[ac_mask, 'ac_charge_time'] = new_ac_ct
-                    result_df.loc[ac_mask, 'ac_total_time'] = new_drive_time + new_ac_ct
-                    result_df.loc[ac_mask, 'ac_charge_cost'] = new_charge_kwh * PRICE_AC_PER_KWH
-                if dc_mask.any():
-                    dc_spd = result_df.loc[dc_mask, 'dc_charging_speed'].values[0]
-                    new_dc_ct = new_charge_kwh / dc_spd if dc_spd > 0 else 0
-                    result_df.loc[dc_mask, 'dc_charge_time'] = new_dc_ct
-                    result_df.loc[dc_mask, 'dc_total_time'] = new_drive_time + new_dc_ct
-                    result_df.loc[dc_mask, 'dc_charge_cost'] = new_charge_kwh * PRICE_DC_PER_KWH
-                # Recalculate best_total_time
-                row_data = result_df.loc[mask].iloc[0]
-                best = float('inf')
-                if row_data['ac_avail'] > 0 and row_data['ac_total_time'] < best:
-                    best = row_data['ac_total_time']
-                if row_data['dc_avail'] > 0 and row_data['dc_total_time'] < best:
-                    best = row_data['dc_total_time']
-                if best < float('inf'):
-                    result_df.loc[mask, 'best_total_time'] = best
+                result_df = update_station_road_metrics(result_df, sid, road_dist_km, new_drive_time)
 
     # 10. Final Guarantee: If the loop terminated but the final winners still
     #     don't have Mapbox routes (e.g. hit the 10-round limit), fetch them now.
-    available_merged = result_df[result_df['has_available'] == True]
-    if not available_merged.empty:
-        final_winners = pd.concat([
-            available_merged.nsmallest(1, 'best_total_time'),
-            available_merged.nsmallest(1, 'distance_to_user')
-        ]).drop_duplicates(subset=['Station ID'])
-        
+    final_winners = select_winners(result_df)
+    if not final_winners.empty:
         for _, cand in final_winners.iterrows():
             sid = cand['Station ID']
             if normalize_sid(sid) not in app_state.station_routes:
-                result = _fetch_mapbox_route(cand['Longitude'], cand['Latitude'])
+                result = fetch_mapbox_route(user_lat, user_lon, cand['Latitude'], cand['Longitude'])
                 if result:
                     road_dist_km, new_drive_time, coords = result
                     app_state.station_routes[normalize_sid(sid)] = coords
-                    
-                    # Update distance/duration/required_kwh with real road values in result_df
-                    new_req_kwh = road_dist_km * (consumption / 100.0)
-                    new_rem_kwh = available_energy - new_req_kwh
-                    new_charge_kwh = max(0, target_energy - new_rem_kwh)
-
-                    mask = result_df['Station ID'] == sid
-                    result_df.loc[mask, 'distance_to_user'] = road_dist_km
-                    result_df.loc[mask, 'drive_time_hours'] = new_drive_time
-                    result_df.loc[mask, 'required_kwh'] = new_req_kwh
-
-                    # Recalculate times and costs with new road values
-                    ac_mask = mask & (result_df['ac_working'] > 0)
-                    dc_mask = mask & (result_df['dc_working'] > 0)
-                    if ac_mask.any():
-                        ac_spd = result_df.loc[ac_mask, 'ac_charging_speed'].values[0]
-                        new_ac_ct = new_charge_kwh / ac_spd if ac_spd > 0 else 0
-                        result_df.loc[ac_mask, 'ac_charge_time'] = new_ac_ct
-                        result_df.loc[ac_mask, 'ac_total_time'] = new_drive_time + new_ac_ct
-                        result_df.loc[ac_mask, 'ac_charge_cost'] = new_charge_kwh * PRICE_AC_PER_KWH
-                    if dc_mask.any():
-                        dc_spd = result_df.loc[dc_mask, 'dc_charging_speed'].values[0]
-                        new_dc_ct = new_charge_kwh / dc_spd if dc_spd > 0 else 0
-                        result_df.loc[dc_mask, 'dc_charge_time'] = new_dc_ct
-                        result_df.loc[dc_mask, 'dc_total_time'] = new_drive_time + new_dc_ct
-                        result_df.loc[dc_mask, 'dc_charge_cost'] = new_charge_kwh * PRICE_DC_PER_KWH
-                    # Recalculate best_total_time
-                    row_data = result_df.loc[mask].iloc[0]
-                    best = float('inf')
-                    if row_data['ac_avail'] > 0 and row_data['ac_total_time'] < best:
-                        best = row_data['ac_total_time']
-                    if row_data['dc_avail'] > 0 and row_data['dc_total_time'] < best:
-                        best = row_data['dc_total_time']
-                    if best < float('inf'):
-                        result_df.loc[mask, 'best_total_time'] = best
+                    result_df = update_station_road_metrics(result_df, sid, road_dist_km, new_drive_time)
 
     return result_df
 

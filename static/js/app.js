@@ -133,17 +133,19 @@ function initMap() {
         userLat = e.result.center[1];
         userLon = e.result.center[0];
         placeUserMarker(userLat, userLon);
-        setLocStatus('ok', `Origin: ${userLat.toFixed(3)}, ${userLon.toFixed(3)}`);
+        setLocStatus('ok', `Origin: ${e.result.place_name || (userLat.toFixed(3) + ', ' + userLon.toFixed(3))}`);
         updateIsochrone();
     });
 
     // Right-click to set location
-    map.on('contextmenu', (e) => {
+    map.on('contextmenu', async (e) => {
         userLat = e.lngLat.lat;
         userLon = e.lngLat.lng;
         placeUserMarker(userLat, userLon);
-        setLocStatus('ok', `Origin: ${userLat.toFixed(3)}, ${userLon.toFixed(3)}`);
+        setLocStatus('warn', `Resolving address...`);
         updateIsochrone();
+        const address = await reverseGeocode(userLat, userLon);
+        setLocStatus('ok', `Origin: ${address}`);
     });
 }
 
@@ -161,6 +163,21 @@ function placeUserMarker(lat, lon) {
 function setLocStatus(type, text) {
     locStatus.className = 'loc-status ' + type;
     locStatus.textContent = text;
+}
+
+async function reverseGeocode(lat, lon) {
+    try {
+        const url = `https://api.mapbox.com/geocoding/v5/mapbox.places/${lon},${lat}.json?access_token=${mapboxgl.accessToken}&limit=1`;
+        const res = await fetch(url);
+        if (!res.ok) throw new Error("Reverse geocoding failed");
+        const data = await res.json();
+        if (data.features && data.features.length > 0) {
+            return data.features[0].place_name;
+        }
+    } catch (e) {
+        console.error("Reverse geocoding error:", e);
+    }
+    return `${lat.toFixed(4)}, ${lon.toFixed(4)}`;
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -238,13 +255,15 @@ function bindEvents() {
 
             setLocStatus('warn', 'Acquiring GPS lock...');
             navigator.geolocation.getCurrentPosition(
-                (position) => {
+                async (position) => {
                     userLat = position.coords.latitude;
                     userLon = position.coords.longitude;
                     placeUserMarker(userLat, userLon);
                     map.flyTo({ center: [userLon, userLat], zoom: 12 });
-                    setLocStatus('ok', `Origin: ${userLat.toFixed(3)}, ${userLon.toFixed(3)}`);
+                    setLocStatus('warn', `Resolving address...`);
                     updateIsochrone();
+                    const address = await reverseGeocode(userLat, userLon);
+                    setLocStatus('ok', `Origin: ${address}`);
                 },
                 (error) => {
                     console.error("Geolocation error:", error);
@@ -389,7 +408,6 @@ function showResults(data) {
 
     const stations = data.stations;
     drawRoutesOnMap(stations, data.max_range_km);
-    renderPopupCards(stations);
 }
 
 function clearResultsOnMap() {
@@ -443,6 +461,11 @@ function drawRoutesOnMap(stations, maxRange) {
         });
         mapLayers.push(`route-line-${idx}`);
 
+        // Create the popup
+        const popup = createStationPopup(st);
+        popup.addTo(map);
+        activePopups.push(popup);
+
         // Station marker
         const stEl = document.createElement('div');
         stEl.className = `station-marker ${typeStr}`;
@@ -450,6 +473,9 @@ function drawRoutesOnMap(stations, maxRange) {
 
         stEl.addEventListener('click', () => {
             map.flyTo({ center: [st.lng, st.lat], zoom: 14, pitch: 60 });
+            if (!popup.isOpen()) {
+                popup.addTo(map);
+            }
         });
 
         const marker = new mapboxgl.Marker({ element: stEl })
@@ -472,71 +498,70 @@ function formatTime(hours) {
     return `${h}h ${m}m`;
 }
 
-function renderPopupCards(stations) {
-    stations.forEach(st => {
-        const badgeHTML = st.is_fastest 
-            ? `<div class="popup-category-badge tag-fastest">⚡ Fastest Charging</div>`
-            : `<div class="popup-category-badge tag-closest">📍 Closest Distance</div>`;
+function createStationPopup(st) {
+    const badgeHTML = st.is_fastest 
+        ? `<div class="popup-category-badge tag-fastest">⚡ Fastest Charging</div>`
+        : `<div class="popup-category-badge tag-closest">📍 Closest Distance</div>`;
 
-        const popupHTML = `
-            <div class="station-popup-card">
-                ${badgeHTML}
-                <h4>${st.name}</h4>
-                <p class="gov">📍 ${st.governrate}</p>
-                <div class="charger-info">
-                    ${st.ac ? `
-                    <div class="charger-row">
-                        <span class="charger-tag tag-ac">AC</span>
-                        <span class="charger-tag tag-avail">${st.ac.available}/${st.ac.working}</span>
-                        <div class="charger-time-cost">
-                            <span>⏱ ${formatTime(st.ac.total_time_h)}</span>
-                            <span class="cost-text">💰 ${st.ac.cost_egp} EGP</span>
-                        </div>
+    const popupHTML = `
+        <div class="station-popup-card">
+            ${badgeHTML}
+            <h4>${st.name}</h4>
+            <p class="gov">📍 ${st.governrate}</p>
+            <div class="charger-info">
+                ${st.ac ? `
+                <div class="charger-row">
+                    <span class="charger-tag tag-ac">AC</span>
+                    <span class="charger-tag tag-avail">${st.ac.available}/${st.ac.working}</span>
+                    <div class="charger-time-cost">
+                        <span>⏱ ${formatTime(st.ac.total_time_h)}</span>
+                        <span class="cost-text">💰 ${st.ac.cost_egp} EGP</span>
                     </div>
-                    <div class="charger-details">
-                        🚗 Drive Time: ${formatTime(st.ac.drive_time_h)} (${st.distance_km} km) | 🔌 Charge: ${formatTime(st.ac.charge_time_h)}
-                    </div>
-                    ` : ''}
-                    
-                    ${st.dc ? `
-                    <div class="charger-row">
-                        <span class="charger-tag tag-dc">DC</span>
-                        <span class="charger-tag tag-avail">${st.dc.available}/${st.dc.working}</span>
-                        <div class="charger-time-cost">
-                            <span>⏱ ${formatTime(st.dc.total_time_h)}</span>
-                            <span class="cost-text">💰 ${st.dc.cost_egp} EGP</span>
-                        </div>
-                    </div>
-                    <div class="charger-details">
-                        🚗 Drive Time: ${formatTime(st.dc.drive_time_h)} (${st.distance_km} km) | 🔌 Charge: ${formatTime(st.dc.charge_time_h)}
-                    </div>
-                    ` : ''}
                 </div>
+                <div class="charger-details">
+                    🚗 Drive Time: ${formatTime(st.ac.drive_time_h)} (${st.distance_km} km) | 🔌 Charge: ${formatTime(st.ac.charge_time_h)}
+                </div>
+                ` : ''}
+                
+                ${st.dc ? `
+                <div class="charger-row">
+                    <span class="charger-tag tag-dc">DC</span>
+                    <span class="charger-tag tag-avail">${st.dc.available}/${st.dc.working}</span>
+                    <div class="charger-time-cost">
+                        <span>⏱ ${formatTime(st.dc.total_time_h)}</span>
+                        <span class="cost-text">💰 ${st.dc.cost_egp} EGP</span>
+                    </div>
+                </div>
+                <div class="charger-details">
+                    🚗 Drive Time: ${formatTime(st.dc.drive_time_h)} (${st.distance_km} km) | 🔌 Charge: ${formatTime(st.dc.charge_time_h)}
+                </div>
+                ` : ''}
             </div>
-        `;
+        </div>
+    `;
 
-        // Create Mapbox Popup
-        const popup = new mapboxgl.Popup({
-            closeOnClick: false,
-            closeButton: true,
-            anchor: 'bottom',
-            offset: 25
-        })
-        .setLngLat([st.lng, st.lat])
-        .setHTML(popupHTML)
-        .addTo(map);
+    // Create Mapbox Popup
+    const popup = new mapboxgl.Popup({
+        closeOnClick: false,
+        closeButton: true,
+        anchor: 'bottom',
+        offset: 25
+    })
+    .setLngLat([st.lng, st.lat])
+    .setHTML(popupHTML);
 
-        // Click handler to redirect to Google Maps Directions
+    // Setup listener to attach click event when DOM element is rendered
+    popup.on('open', () => {
         const element = popup.getElement();
         if (element) {
             const card = element.querySelector('.station-popup-card');
             if (card) {
-                card.addEventListener('click', () => {
+                card.onclick = () => {
                     window.open(`https://www.google.com/maps/dir/?api=1&destination=${st.lat},${st.lng}`, '_blank');
-                });
+                };
             }
         }
-
-        activePopups.push(popup);
     });
+
+    return popup;
 }
