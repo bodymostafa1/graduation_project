@@ -11,6 +11,7 @@ let allStationsGeoJSON = null;
 let currentMaxRangeKm = 0;
 let mapLayers = [];
 let stationMarkers = [];
+let activePopups = [];
 
 // Charts
 let tradeoffChartInst = null;
@@ -19,28 +20,21 @@ let batteryChartInst = null;
 // ── DOM References ──
 const $ = id => document.getElementById(id);
 
-const brandSelect     = $('brand-select');
-const modelSelect     = $('model-select');
-const bsizeSelect     = $('battery-size-select');
-const batSlider       = $('bat-slider');
-const batVal          = $('bat-val');
-const tgtSlider       = $('tgt-slider');
-const tgtVal          = $('tgt-val');
-const chargerPref     = $('charger-pref');
-const locStatus       = $('loc-status');
-const runBtn          = $('run-btn');
-const spinner         = $('spinner');
-const sidebar         = $('sidebar');
-const toggleSidebarBtn= $('toggle-sidebar-btn');
-const heatmapToggle   = $('heatmap-toggle');
-
-// Drawer
-const bottomDrawer    = $('bottom-drawer');
-const closeDrawerBtn  = $('close-drawer-btn');
-const summaryBar      = $('summary-bar');
-const fastestCardsArea = $('fastest-cards');
-const closestCardsArea = $('closest-cards');
-const geolocateBtn    = $('geolocate-btn-top');
+const brandSelect = $('brand-select');
+const modelSelect = $('model-select');
+const bsizeSelect = $('battery-size-select');
+const batSlider = $('bat-slider');
+const batVal = $('bat-val');
+const tgtSlider = $('tgt-slider');
+const tgtVal = $('tgt-val');
+const chargerPref = $('charger-pref');
+const locStatus = $('loc-status');
+const runBtn = $('run-btn');
+const spinner = $('spinner');
+const sidebar = $('sidebar');
+const toggleSidebarBtn = $('toggle-sidebar-btn');
+const heatmapToggle = $('heatmap-toggle');
+const geolocateBtn = $('geolocate-btn-top');
 
 // ═══════════════════════════════════════════════════════════════
 //  INITIALIZATION
@@ -132,9 +126,9 @@ function initMap() {
         marker: false,
         placeholder: 'Search for a location...',
     });
-    
+
     document.getElementById('geocoder-container').appendChild(geocoder.onAdd(map));
-    
+
     geocoder.on('result', (e) => {
         userLat = e.result.center[1];
         userLon = e.result.center[0];
@@ -241,7 +235,7 @@ function bindEvents() {
                 setLocStatus('error', 'Geolocation not supported by browser');
                 return;
             }
-            
+
             setLocStatus('warn', 'Acquiring GPS lock...');
             navigator.geolocation.getCurrentPosition(
                 (position) => {
@@ -269,11 +263,6 @@ function bindEvents() {
         sidebar.classList.toggle('collapsed');
     });
 
-    closeDrawerBtn.addEventListener('click', () => {
-        bottomDrawer.classList.remove('active');
-        clearResultsOnMap();
-    });
-
     heatmapToggle.addEventListener('change', (e) => {
         if (!map.getLayer('stations-heatmap')) return;
         map.setLayoutProperty('stations-heatmap', 'visibility', e.target.checked ? 'visible' : 'none');
@@ -294,11 +283,11 @@ async function fetchStationsForHeatmap() {
             geometry: { type: 'Point', coordinates: [s.lng, s.lat] }
         }));
         allStationsGeoJSON = { type: 'FeatureCollection', features };
-        
+
         if (map.getSource('stations-heat')) {
             map.getSource('stations-heat').setData(allStationsGeoJSON);
         }
-    } catch(e) { console.error("Heatmap fetch error:", e); }
+    } catch (e) { console.error("Heatmap fetch error:", e); }
 }
 
 // Fast rough estimation of range based on battery %
@@ -307,13 +296,13 @@ function estimateRange() {
     // so we approximate. ~20 kWh/100km.
     const batStr = bsizeSelect.value;
     if (!batStr || batStr === 'No Data') return 0;
-    
+
     // Extract number from string like "75 kWh"
     const capMatch = batStr.match(/(\d+(\.\d+)?)/);
     if (!capMatch) return 0;
     const capacity = parseFloat(capMatch[1]);
     const currentPct = parseInt(batSlider.value) / 100;
-    
+
     const availableKwh = capacity * currentPct;
     return (availableKwh / 20.0) * 100; // rough max range km
 }
@@ -321,7 +310,7 @@ function estimateRange() {
 function updateIsochrone() {
     if (!userLat || !userLon) return;
     const maxRange = estimateRange();
-    
+
     if (maxRange <= 0) {
         clearIsochrone();
         return;
@@ -391,20 +380,16 @@ async function runSimulation() {
 // ═══════════════════════════════════════════════════════════════
 
 function showResults(data) {
-    bottomDrawer.classList.add('active');
-    summaryBar.textContent = data.summary || '';
-    fastestCardsArea.innerHTML = '';
-    closestCardsArea.innerHTML = '';
     clearResultsOnMap();
 
     if (data.status !== 'ok') {
-        fastestCardsArea.innerHTML = `<div class="loc-status error" style="margin:20px;">${data.message}</div>`;
+        alert(data.message);
         return;
     }
 
     const stations = data.stations;
-    renderDetailedCards(stations);
     drawRoutesOnMap(stations, data.max_range_km);
+    renderPopupCards(stations);
 }
 
 function clearResultsOnMap() {
@@ -417,6 +402,9 @@ function clearResultsOnMap() {
 
     stationMarkers.forEach(m => m.remove());
     stationMarkers = [];
+
+    activePopups.forEach(p => p.remove());
+    activePopups = [];
 }
 
 function drawRoutesOnMap(stations, maxRange) {
@@ -459,7 +447,7 @@ function drawRoutesOnMap(stations, maxRange) {
         const stEl = document.createElement('div');
         stEl.className = `station-marker ${typeStr}`;
         stEl.innerHTML = st.is_fastest ? '⚡' : '📍';
-        
+
         stEl.addEventListener('click', () => {
             map.flyTo({ center: [st.lng, st.lat], zoom: 14, pitch: 60 });
         });
@@ -467,7 +455,7 @@ function drawRoutesOnMap(stations, maxRange) {
         const marker = new mapboxgl.Marker({ element: stEl })
             .setLngLat([st.lng, st.lat])
             .addTo(map);
-        
+
         stationMarkers.push(marker);
 
         routeCoords.forEach(c => bounds.extend(c));
@@ -480,63 +468,75 @@ function formatTime(hours) {
     if (hours === null || hours === undefined) return '--';
     const h = Math.floor(hours);
     const m = Math.round((hours - h) * 60);
+    if (h === 0) return `${m}m`;
     return `${h}h ${m}m`;
 }
 
-function renderDetailedCards(stations) {
+function renderPopupCards(stations) {
     stations.forEach(st => {
-        const cardHTML = `
-            <h4>${st.name}</h4>
-            <p class="gov">📍 ${st.governrate}</p>
-            <div class="charger-info">
-                ${st.ac ? `
-                <div class="charger-row">
-                    <span class="charger-tag tag-ac">AC</span>
-                    <span class="charger-tag tag-avail">${st.ac.available}/${st.ac.working}</span>
-                    <div class="charger-time-cost">
-                        <span>⏱ ${formatTime(st.ac.total_time_h)}</span>
-                        <span class="cost-text">💰 ${st.ac.cost_egp} EGP</span>
+        const badgeHTML = st.is_fastest 
+            ? `<div class="popup-category-badge tag-fastest">⚡ Fastest Charging</div>`
+            : `<div class="popup-category-badge tag-closest">📍 Closest Distance</div>`;
+
+        const popupHTML = `
+            <div class="station-popup-card">
+                ${badgeHTML}
+                <h4>${st.name}</h4>
+                <p class="gov">📍 ${st.governrate}</p>
+                <div class="charger-info">
+                    ${st.ac ? `
+                    <div class="charger-row">
+                        <span class="charger-tag tag-ac">AC</span>
+                        <span class="charger-tag tag-avail">${st.ac.available}/${st.ac.working}</span>
+                        <div class="charger-time-cost">
+                            <span>⏱ ${formatTime(st.ac.total_time_h)}</span>
+                            <span class="cost-text">💰 ${st.ac.cost_egp} EGP</span>
+                        </div>
                     </div>
-                </div>
-                <div class="charger-details">
-                    🚗 Travel: ${formatTime(st.ac.drive_time_h)} | 🔌 Charge: ${formatTime(st.ac.charge_time_h)}
-                </div>
-                ` : ''}
-                
-                ${st.dc ? `
-                <div class="charger-row">
-                    <span class="charger-tag tag-dc">DC</span>
-                    <span class="charger-tag tag-avail">${st.dc.available}/${st.dc.working}</span>
-                    <div class="charger-time-cost">
-                        <span>⏱ ${formatTime(st.dc.total_time_h)}</span>
-                        <span class="cost-text">💰 ${st.dc.cost_egp} EGP</span>
+                    <div class="charger-details">
+                        🚗 Drive Time: ${formatTime(st.ac.drive_time_h)} (${st.distance_km} km) | 🔌 Charge: ${formatTime(st.ac.charge_time_h)}
                     </div>
+                    ` : ''}
+                    
+                    ${st.dc ? `
+                    <div class="charger-row">
+                        <span class="charger-tag tag-dc">DC</span>
+                        <span class="charger-tag tag-avail">${st.dc.available}/${st.dc.working}</span>
+                        <div class="charger-time-cost">
+                            <span>⏱ ${formatTime(st.dc.total_time_h)}</span>
+                            <span class="cost-text">💰 ${st.dc.cost_egp} EGP</span>
+                        </div>
+                    </div>
+                    <div class="charger-details">
+                        🚗 Drive Time: ${formatTime(st.dc.drive_time_h)} (${st.distance_km} km) | 🔌 Charge: ${formatTime(st.dc.charge_time_h)}
+                    </div>
+                    ` : ''}
                 </div>
-                <div class="charger-details">
-                    🚗 Travel: ${formatTime(st.dc.drive_time_h)} | 🔌 Charge: ${formatTime(st.dc.charge_time_h)}
-                </div>
-                ` : ''}
             </div>
         `;
-        
-        if (st.is_fastest) {
-            const cardFastest = document.createElement('div');
-            cardFastest.className = 'station-card';
-            cardFastest.innerHTML = cardHTML;
-            cardFastest.addEventListener('click', () => {
-                map.flyTo({ center: [st.lng, st.lat], zoom: 14, pitch: 60 });
-            });
-            fastestCardsArea.appendChild(cardFastest);
+
+        // Create Mapbox Popup
+        const popup = new mapboxgl.Popup({
+            closeOnClick: false,
+            closeButton: true,
+            anchor: 'bottom',
+            offset: 25
+        })
+        .setLngLat([st.lng, st.lat])
+        .setHTML(popupHTML)
+        .addTo(map);
+
+        // Click handler to redirect to Google Maps Directions
+        const element = popup.getElement();
+        if (element) {
+            const card = element.querySelector('.station-popup-card');
+            if (card) {
+                card.addEventListener('click', () => {
+                    window.open(`https://www.google.com/maps/dir/?api=1&destination=${st.lat},${st.lng}`, '_blank');
+                });
+            }
         }
-        
-        if (st.is_closest) {
-            const cardClosest = document.createElement('div');
-            cardClosest.className = 'station-card';
-            cardClosest.innerHTML = cardHTML;
-            cardClosest.addEventListener('click', () => {
-                map.flyTo({ center: [st.lng, st.lat], zoom: 14, pitch: 60 });
-            });
-            closestCardsArea.appendChild(cardClosest);
-        }
+
+        activePopups.push(popup);
     });
 }

@@ -316,8 +316,43 @@ def simulation_engine(stations_df, current_hour, user_lat, user_lon, max_range_k
             if normalize_sid(sid) not in app_state.station_routes:
                 result = _fetch_mapbox_route(cand['Longitude'], cand['Latitude'])
                 if result:
-                    # We don't recalculate distances here so the winners remain stable
-                    app_state.station_routes[normalize_sid(sid)] = result[2]
+                    road_dist_km, new_drive_time, coords = result
+                    app_state.station_routes[normalize_sid(sid)] = coords
+                    
+                    # Update distance/duration/required_kwh with real road values in result_df
+                    new_req_kwh = road_dist_km * (consumption / 100.0)
+                    new_rem_kwh = available_energy - new_req_kwh
+                    new_charge_kwh = max(0, target_energy - new_rem_kwh)
+
+                    mask = result_df['Station ID'] == sid
+                    result_df.loc[mask, 'distance_to_user'] = road_dist_km
+                    result_df.loc[mask, 'drive_time_hours'] = new_drive_time
+                    result_df.loc[mask, 'required_kwh'] = new_req_kwh
+
+                    # Recalculate times and costs with new road values
+                    ac_mask = mask & (result_df['ac_working'] > 0)
+                    dc_mask = mask & (result_df['dc_working'] > 0)
+                    if ac_mask.any():
+                        ac_spd = result_df.loc[ac_mask, 'ac_charging_speed'].values[0]
+                        new_ac_ct = new_charge_kwh / ac_spd if ac_spd > 0 else 0
+                        result_df.loc[ac_mask, 'ac_charge_time'] = new_ac_ct
+                        result_df.loc[ac_mask, 'ac_total_time'] = new_drive_time + new_ac_ct
+                        result_df.loc[ac_mask, 'ac_charge_cost'] = new_charge_kwh * PRICE_AC_PER_KWH
+                    if dc_mask.any():
+                        dc_spd = result_df.loc[dc_mask, 'dc_charging_speed'].values[0]
+                        new_dc_ct = new_charge_kwh / dc_spd if dc_spd > 0 else 0
+                        result_df.loc[dc_mask, 'dc_charge_time'] = new_dc_ct
+                        result_df.loc[dc_mask, 'dc_total_time'] = new_drive_time + new_dc_ct
+                        result_df.loc[dc_mask, 'dc_charge_cost'] = new_charge_kwh * PRICE_DC_PER_KWH
+                    # Recalculate best_total_time
+                    row_data = result_df.loc[mask].iloc[0]
+                    best = float('inf')
+                    if row_data['ac_avail'] > 0 and row_data['ac_total_time'] < best:
+                        best = row_data['ac_total_time']
+                    if row_data['dc_avail'] > 0 and row_data['dc_total_time'] < best:
+                        best = row_data['dc_total_time']
+                    if best < float('inf'):
+                        result_df.loc[mask, 'best_total_time'] = best
 
     return result_df
 
