@@ -91,15 +91,14 @@ html, body {
 }
 
 .toggle-sidebar {
-    position: absolute;
-    top: 16px;
-    right: 16px;
     background: transparent;
     border: none;
     color: var(--muted-foreground);
     font-size: 20px;
     cursor: pointer;
     transition: color 0.2s;
+    flex-shrink: 0;
+    margin-left: 16px;
 }
 
 .toggle-sidebar:hover {
@@ -207,6 +206,9 @@ html, body {
 
 /* App Title */
 .app-title {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
     padding: 20px 24px 16px;
     border-bottom: 1px solid var(--border);
 }
@@ -705,6 +707,11 @@ input:checked + .slider.round:before { transform: translateX(16px); }
         left: 16px;
         transform: none;
         box-sizing: border-box;
+    }
+
+    .mapboxgl-ctrl-top-right {
+        top: 80px !important;
+        right: 16px !important;
     }
     
     #geocoder-container {
