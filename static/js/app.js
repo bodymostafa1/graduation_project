@@ -50,6 +50,15 @@ document.addEventListener('DOMContentLoaded', async () => {
 function initMap() {
     mapboxgl.accessToken = window.MAPBOX_TOKEN;
 
+    // Enable Mapbox GL RTL Text Plugin to support correct Arabic labels (RTL & letter-joining)
+    if (mapboxgl.getRTLTextPluginStatus() === 'unavailable') {
+        mapboxgl.setRTLTextPlugin(
+            'https://api.mapbox.com/mapbox-gl-js/plugins/mapbox-gl-rtl-text/v0.2.3/mapbox-gl-rtl-text.js',
+            null,
+            true // Lazy load
+        );
+    }
+
     map = new mapboxgl.Map({
         container: 'map',
         style: 'mapbox://styles/mapbox/navigation-night-v1', // Premium dark style
