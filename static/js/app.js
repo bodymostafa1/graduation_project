@@ -396,7 +396,7 @@ async function runSimulation() {
 
         showResults(result);
     } catch (err) {
-        alert("Optimization failed: " + err.message);
+        showAlert("Optimization failed: " + err.message, "Error", "❌", "error");
     } finally {
         runBtn.disabled = false;
         spinner.classList.remove('active');
@@ -411,7 +411,7 @@ function showResults(data) {
     clearResultsOnMap();
 
     if (data.status !== 'ok') {
-        alert(data.message);
+        showAlert(data.message, "Notice", "⚠️", "warn");
         return;
     }
 
@@ -573,4 +573,47 @@ function createStationPopup(st) {
     });
 
     return popup;
+}
+
+/**
+ * Shows a premium alert modal in the middle of the screen
+ */
+function showAlert(message, title = "Notification", icon = "⚠️", type = "warn") {
+    const overlay = $('custom-modal');
+    const titleEl = $('modal-title');
+    const bodyEl = $('modal-body');
+    const okBtn = $('modal-ok-btn');
+
+    titleEl.textContent = title;
+    bodyEl.innerHTML = message;
+    
+    // Set icon
+    const iconEl = overlay.querySelector('.modal-icon');
+    if (iconEl) iconEl.textContent = icon;
+
+    // Reset and apply type class
+    overlay.className = 'modal-overlay';
+    if (type) overlay.classList.add(`type-${type}`);
+    overlay.classList.add('active');
+
+    return new Promise((resolve) => {
+        const close = () => {
+            overlay.classList.remove('active');
+            okBtn.removeEventListener('click', onClose);
+            document.removeEventListener('keydown', onKeyDown);
+            resolve();
+        };
+
+        const onClose = () => close();
+
+        const onKeyDown = (e) => {
+            if (e.key === 'Enter' || e.key === 'Escape') {
+                e.preventDefault();
+                close();
+            }
+        };
+
+        okBtn.addEventListener('click', onClose);
+        document.addEventListener('keydown', onKeyDown);
+    });
 }

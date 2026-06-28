@@ -183,13 +183,14 @@ def simulation_engine(stations_df, current_hour, user_lat, user_lon, max_range_k
         station_stats.loc[non_top_mask, 'distance_to_user'] / 50.0
     )
 
+    # Set the nearest station distance based on updated road distances (or Haversine fallbacks)
+    if not station_stats.empty:
+        app_state.nearest_station_dist = station_stats['distance_to_user'].min()
 
     station_stats = station_stats[station_stats['distance_to_user'] <= max_range_km].copy()
     
     if station_stats.empty:
         return pd.DataFrame()
-        
-    app_state.nearest_station_dist = station_stats['distance_to_user'].min()
 
     # 2. Time Multiplier
     hours = [0, 3, 7, 12, 17, 21, 24]

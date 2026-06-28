@@ -906,3 +906,124 @@ input:checked + .slider.round:before { transform: translateX(16px); }
     border-left: 3px solid rgba(255, 255, 255, 0.1);
 }
 
+/* ── Custom Alert Modal ── */
+.modal-overlay {
+    position: fixed;
+    top: 0; left: 0;
+    width: 100vw; height: 100vh;
+    background: rgba(0, 0, 0, 0.7);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 1000;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.modal-overlay.active {
+    opacity: 1;
+    pointer-events: auto;
+}
+
+.modal-card {
+    background: var(--popover);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    width: 90%;
+    max-width: 440px;
+    box-shadow: 0 25px 60px -15px rgba(0, 0, 0, 0.7);
+    transform: scale(0.9) translateY(30px);
+    transition: transform 0.3s cubic-bezier(0.34, 1.56, 0.64, 1), border-color 0.3s;
+    overflow: hidden;
+}
+
+.modal-overlay.active .modal-card {
+    transform: scale(1) translateY(0);
+}
+
+.modal-header {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 24px 24px 16px;
+    border-bottom: 1px solid var(--border);
+}
+
+.modal-icon {
+    font-size: 24px;
+    line-height: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.modal-header h3 {
+    font-size: 16px;
+    font-weight: 700;
+    color: var(--foreground);
+    margin: 0;
+    letter-spacing: -0.3px;
+}
+
+.modal-body {
+    padding: 24px;
+    font-size: 14px;
+    line-height: 1.6;
+    color: var(--muted-foreground);
+}
+
+.modal-footer {
+    display: flex;
+    justify-content: flex-end;
+    padding: 16px 24px 24px;
+    border-top: 1px solid var(--border);
+}
+
+.modal-btn {
+    padding: 10px 24px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--foreground);
+    color: var(--primary-foreground);
+    font-weight: 600;
+    font-size: 13px;
+    cursor: pointer;
+    transition: background 0.2s, transform 0.1s, border-color 0.2s;
+    box-shadow: 0 4px 12px rgba(255, 255, 255, 0.1);
+}
+
+.modal-btn:hover {
+    background: #e4e4e7;
+    border-color: rgba(255, 255, 255, 0.2);
+}
+
+.modal-btn:active {
+    transform: scale(0.96);
+}
+
+/* Modal Variant Colors */
+.modal-overlay.type-error .modal-card {
+    border-color: rgba(244, 63, 94, 0.5); /* rose */
+    box-shadow: 0 25px 60px -15px rgba(0, 0, 0, 0.7), 0 0 30px rgba(244, 63, 94, 0.15);
+}
+.modal-overlay.type-error .modal-icon {
+    color: #fb7185;
+}
+.modal-overlay.type-warn .modal-card {
+    border-color: rgba(245, 158, 11, 0.5); /* orange */
+    box-shadow: 0 25px 60px -15px rgba(0, 0, 0, 0.7), 0 0 30px rgba(245, 158, 11, 0.15);
+}
+.modal-overlay.type-warn .modal-icon {
+    color: #fbbf24;
+}
+.modal-overlay.type-success .modal-card {
+    border-color: rgba(16, 185, 129, 0.5); /* emerald */
+    box-shadow: 0 25px 60px -15px rgba(0, 0, 0, 0.7), 0 0 30px rgba(16, 185, 129, 0.15);
+}
+.modal-overlay.type-success .modal-icon {
+    color: #34d399;
+}
+
