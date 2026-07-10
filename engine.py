@@ -6,8 +6,10 @@ import os
 import pandas as pd
 import numpy as np
 import requests
+import logging
 from state import app_state
 
+logger = logging.getLogger(__name__)
 
 # Charging prices in Egypt (EGP per kWh)
 PRICE_DC_PER_KWH = 7.67
@@ -24,7 +26,7 @@ def normalize_sid(sid_val):
 def fetch_mapbox_route(user_lat, user_lon, s_lat, s_lon, retries=2):
     """Fetch a Mapbox route with retry. Returns (dist_km, dur_hrs, coords) or None."""
     MAPBOX_TOKEN = os.getenv("MAPBOX_SECRET_TOKEN", "")
-    print(f"--> Attempting to fetch Mapbox route to destination ({s_lat}, {s_lon}) from ({user_lat}, {user_lon})", flush=True)
+    logger.info(f"--> Attempting to fetch Mapbox route to destination ({s_lat}, {s_lon}) from ({user_lat}, {user_lon})")
     for attempt in range(retries + 1):
         try:
             url = (
@@ -35,7 +37,7 @@ def fetch_mapbox_route(user_lat, user_lon, s_lat, s_lon, retries=2):
             response = requests.get(url, timeout=10)
             
             if response.status_code != 200:
-                print(f"[Attempt {attempt+1}] Mapbox HTTP Error {response.status_code}: {response.text}", flush=True)
+                logger.error(f"[Attempt {attempt+1}] Mapbox HTTP Error {response.status_code}: Request failed.")
                 continue
                 
             res = response.json()
@@ -44,14 +46,14 @@ def fetch_mapbox_route(user_lat, user_lon, s_lat, s_lon, retries=2):
                 dist_km = route['distance'] / 1000.0
                 dur_hrs = route['duration'] / 3600.0
                 coords = [[c[1], c[0]] for c in route['geometry']['coordinates']]
-                print(f"    SUCCESS: Fetched route, distance={dist_km:.2f}km, duration={dur_hrs:.2f}hrs", flush=True)
+                logger.info(f"    SUCCESS: Fetched route, distance={dist_km:.2f}km, duration={dur_hrs:.2f}hrs")
                 return dist_km, dur_hrs, coords
             else:
-                print(f"[Attempt {attempt+1}] Mapbox API Error Code: {res.get('code')}, Message: {res.get('message', 'None')}", flush=True)
+                logger.error(f"[Attempt {attempt+1}] Mapbox API Error Code: {res.get('code')}, Message: {res.get('message', 'None')}")
         except Exception as e:
-            print(f"[Attempt {attempt+1}] Exception during route fetch: {repr(e)}", flush=True)
+            logger.error(f"[Attempt {attempt+1}] Exception during route fetch: An error occurred.")
     
-    print(f"    FAILED to fetch Mapbox route for dest({s_lat}, {s_lon}) after {retries + 1} attempts.", flush=True)
+    logger.warning(f"    FAILED to fetch Mapbox route for dest({s_lat}, {s_lon}) after {retries + 1} attempts.")
     return None
 
 
@@ -117,7 +119,7 @@ def simulation_engine(stations_df, current_hour, user_lat, user_lon, max_range_k
     np.random.seed(42)
     app_state.station_routes = {}
 
-    print(f"\n[ENGINE] simulation_engine called with {len(stations_df)} stations", flush=True)
+    logger.info(f"\n[ENGINE] simulation_engine called with {len(stations_df)} stations")
     if stations_df.empty:
         return pd.DataFrame()
 
@@ -150,7 +152,7 @@ def simulation_engine(stations_df, current_hour, user_lat, user_lon, max_range_k
     station_stats = station_stats[station_stats['distance_to_user'] <= max_range_km].copy()
 
     if station_stats.empty:
-        print("[ENGINE] All stations out of range. Returning empty.", flush=True)
+        logger.info("[ENGINE] All stations out of range. Returning empty.")
         return pd.DataFrame()
 
     # --- PHASE 2: Mapbox Directions API for top 10 closest unique stations ---
