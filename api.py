@@ -7,7 +7,7 @@ from typing import Optional
 from datetime import datetime
 
 from state import app_state
-from engine import simulation_engine, fetch_mapbox_route, update_station_road_metrics
+from engine import simulation_engine, fetch_mapbox_routes_batch, update_station_road_metrics
 import math
 import pandas as pd
 
@@ -55,12 +55,13 @@ async def get_all_stations():
     if app_state.stations_df is None or app_state.stations_df.empty:
         return {"stations": []}
     
-    # We just need lat/lon coordinates
+    # Pre-calculated unique station list
+    if hasattr(app_state, 'stations_list') and app_state.stations_list:
+        return {"stations": app_state.stations_list}
+
     df = app_state.stations_df.drop_duplicates(subset=['Station ID'])
-    
     stations = []
     for _, row in df.iterrows():
-        # Ensure we have valid coordinates
         if pd.isna(row['Latitude']) or pd.isna(row['Longitude']):
             continue
             
@@ -69,7 +70,7 @@ async def get_all_stations():
             "lat": float(row['Latitude']),
             "lng": float(row['Longitude']),
         })
-        
+    app_state.stations_list = stations
     return {"stations": stations}
 
 # ── Run simulation ──
@@ -115,10 +116,10 @@ async def run_simulation(req: SimulationRequest):
     app_state.user_lon = req.user_lon
 
     # Filter by charger preference
-    filtered_df = app_state.stations_df.copy()
+    filtered_df = app_state.stations_df
     if req.charger_pref != "Any":
-        filtered_df['Charger type'] = filtered_df['Charger type'].fillna('Unknown')
-        filtered_df = filtered_df[filtered_df['Charger type'].str.upper() == req.charger_pref.upper()]
+        charger_types = filtered_df['Charger type'].fillna('Unknown')
+        filtered_df = filtered_df[charger_types.str.upper() == req.charger_pref.upper()]
 
     current_hour = datetime.now().hour + (datetime.now().minute / 60.0)
 
@@ -141,7 +142,7 @@ async def run_simulation(req: SimulationRequest):
             "available_energy": available_energy,
         }
 
-    available = result_df[result_df['has_available'] == True].copy()
+    available = result_df[result_df['has_available'] == True]
     if available.empty:
         return {
             "status": "all_occupied",
@@ -159,37 +160,25 @@ async def run_simulation(req: SimulationRequest):
             return s[:-2]
         return s
 
-    # Final Guarantee in api.py: Ensure that winners are stably sorted and
-    # definitely have their Mapbox road routes fetched and updated.
-    for _ in range(5):
-        available = result_df[result_df['has_available'] == True]
-        if available.empty:
-            break
-        fastest = available.sort_values(by=['best_total_time', 'Station ID']).head(1)
-        closest = available.sort_values(by=['distance_to_user', 'Station ID']).head(1)
-        top = pd.concat([fastest, closest]).drop_duplicates(subset=['Station ID'])
-        
-        needs_fetch = [
-            row for _, row in top.iterrows()
-            if normalize_sid(row['Station ID']) not in app_state.station_routes
-        ]
-        if not needs_fetch:
-            break
-            
-        for row in needs_fetch:
-            sid = row['Station ID']
-            norm_sid = normalize_sid(sid)
-            result = fetch_mapbox_route(req.user_lat, req.user_lon, row['Latitude'], row['Longitude'])
-            if result:
-                road_dist_km, new_drive_time, coords = result
-                app_state.station_routes[norm_sid] = coords
-                result_df = update_station_road_metrics(result_df, sid, road_dist_km, new_drive_time)
-
-    # Re-calculate top one final time after any potential fetches
-    available = result_df[result_df['has_available'] == True]
     fastest = available.sort_values(by=['best_total_time', 'Station ID']).head(1)
     closest = available.sort_values(by=['distance_to_user', 'Station ID']).head(1)
     top = pd.concat([fastest, closest]).drop_duplicates(subset=['Station ID'])
+
+    needs_fetch = [
+        (row['Station ID'], row['Latitude'], row['Longitude'])
+        for _, row in top.iterrows()
+        if normalize_sid(row['Station ID']) not in app_state.station_routes
+    ]
+    if needs_fetch:
+        routes_dict = fetch_mapbox_routes_batch(req.user_lat, req.user_lon, needs_fetch)
+        for sid, (road_dist_km, new_drive_time, coords) in routes_dict.items():
+            app_state.station_routes[normalize_sid(sid)] = coords
+            result_df = update_station_road_metrics(result_df, sid, road_dist_km, new_drive_time)
+
+        available = result_df[result_df['has_available'] == True]
+        fastest = available.sort_values(by=['best_total_time', 'Station ID']).head(1)
+        closest = available.sort_values(by=['distance_to_user', 'Station ID']).head(1)
+        top = pd.concat([fastest, closest]).drop_duplicates(subset=['Station ID'])
 
     def safe_float(v):
         if pd.isna(v) or v is None:
@@ -214,12 +203,6 @@ async def run_simulation(req: SimulationRequest):
         norm_sid = normalize_sid(sid)
         coords = app_state.station_routes.get(norm_sid)
         
-        # Debugging
-        if coords is None:
-            print(f"[API] Route NOT FOUND for sid: '{norm_sid}' (type {type(sid)}). Available keys: {list(app_state.station_routes.keys())}", flush=True)
-        else:
-            print(f"[API] Route FOUND for sid: '{norm_sid}' with {len(coords)} points", flush=True)
-            
         if coords is None or len(coords) == 0:
             coords = [
                 [req.user_lat, req.user_lon],

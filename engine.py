@@ -6,12 +6,18 @@ import os
 import pandas as pd
 import numpy as np
 import requests
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from state import app_state
-
 
 # Charging prices in Egypt (EGP per kWh)
 PRICE_DC_PER_KWH = 7.67
 PRICE_AC_PER_KWH = 3.97
+
+# Session re-use for HTTP Keep-Alive
+_HTTP_SESSION = requests.Session()
+
+# In-memory route cache keyed by (user_lat, user_lon, s_lat, s_lon)
+_ROUTE_CACHE = {}
 
 
 def normalize_sid(sid_val):
@@ -22,17 +28,21 @@ def normalize_sid(sid_val):
 
 
 def fetch_mapbox_route(user_lat, user_lon, s_lat, s_lon, retries=2):
-    """Fetch a Mapbox route with retry. Returns (dist_km, dur_hrs, coords) or None."""
+    """Fetch a Mapbox route with retry and in-memory caching. Returns (dist_km, dur_hrs, coords) or None."""
+    cache_key = (round(user_lat, 5), round(user_lon, 5), round(s_lat, 5), round(s_lon, 5))
+    if cache_key in _ROUTE_CACHE:
+        return _ROUTE_CACHE[cache_key]
+
     MAPBOX_TOKEN = os.getenv("MAPBOX_SECRET_TOKEN", "")
-    print(f"--> Attempting to fetch Mapbox route to destination ({s_lat}, {s_lon}) from ({user_lat}, {user_lon})", flush=True)
+    url = (
+        f"https://api.mapbox.com/directions/v5/mapbox/driving/"
+        f"{user_lon},{user_lat};{s_lon},{s_lat}"
+        f"?overview=full&geometries=geojson&access_token={MAPBOX_TOKEN}"
+    )
+
     for attempt in range(retries + 1):
         try:
-            url = (
-                f"https://api.mapbox.com/directions/v5/mapbox/driving/"
-                f"{user_lon},{user_lat};{s_lon},{s_lat}"
-                f"?overview=full&geometries=geojson&access_token={MAPBOX_TOKEN}"
-            )
-            response = requests.get(url, timeout=10)
+            response = _HTTP_SESSION.get(url, timeout=10)
             
             if response.status_code != 200:
                 print(f"[Attempt {attempt+1}] Mapbox HTTP Error {response.status_code}: {response.text}", flush=True)
@@ -44,15 +54,39 @@ def fetch_mapbox_route(user_lat, user_lon, s_lat, s_lon, retries=2):
                 dist_km = route['distance'] / 1000.0
                 dur_hrs = route['duration'] / 3600.0
                 coords = [[c[1], c[0]] for c in route['geometry']['coordinates']]
-                print(f"    SUCCESS: Fetched route, distance={dist_km:.2f}km, duration={dur_hrs:.2f}hrs", flush=True)
-                return dist_km, dur_hrs, coords
+                result = (dist_km, dur_hrs, coords)
+                _ROUTE_CACHE[cache_key] = result
+                return result
             else:
                 print(f"[Attempt {attempt+1}] Mapbox API Error Code: {res.get('code')}, Message: {res.get('message', 'None')}", flush=True)
         except Exception as e:
             print(f"[Attempt {attempt+1}] Exception during route fetch: {repr(e)}", flush=True)
     
-    print(f"    FAILED to fetch Mapbox route for dest({s_lat}, {s_lon}) after {retries + 1} attempts.", flush=True)
     return None
+
+
+def fetch_mapbox_routes_batch(user_lat, user_lon, targets, max_workers=10):
+    """
+    Fetch Mapbox routes in parallel using ThreadPoolExecutor.
+    targets: list of (key, s_lat, s_lon) tuples, where key is sid or item identifier.
+    Returns dict: {key: (dist_km, dur_hrs, coords)}
+    """
+    results = {}
+    if not targets:
+        return results
+
+    with ThreadPoolExecutor(max_workers=min(len(targets), max_workers)) as executor:
+        future_to_key = {
+            executor.submit(fetch_mapbox_route, user_lat, user_lon, s_lat, s_lon): key
+            for key, s_lat, s_lon in targets
+        }
+        for future in as_completed(future_to_key):
+            key = future_to_key[future]
+            res = future.result()
+            if res is not None:
+                results[key] = res
+
+    return results
 
 
 def select_winners(df):
@@ -117,7 +151,6 @@ def simulation_engine(stations_df, current_hour, user_lat, user_lon, max_range_k
     np.random.seed(42)
     app_state.station_routes = {}
 
-    print(f"\n[ENGINE] simulation_engine called with {len(stations_df)} stations", flush=True)
     if stations_df.empty:
         return pd.DataFrame()
 
@@ -150,34 +183,31 @@ def simulation_engine(stations_df, current_hour, user_lat, user_lon, max_range_k
     station_stats = station_stats[station_stats['distance_to_user'] <= max_range_km].copy()
 
     if station_stats.empty:
-        print("[ENGINE] All stations out of range. Returning empty.", flush=True)
         return pd.DataFrame()
 
-    # --- PHASE 2: Mapbox Directions API for top 10 closest unique stations ---
-    MAPBOX_TOKEN = os.getenv("MAPBOX_SECRET_TOKEN", "")
-
-    # Pick top 15 unique stations by Haversine (not rows — avoids AC+DC eating slots)
+    # --- PHASE 2: Parallel Mapbox Directions API for top 15 closest unique stations ---
     unique_closest = (
         station_stats.groupby('Station ID')['distance_to_user']
         .min().nsmallest(15)
     )
     top_station_ids = set(unique_closest.index)
 
-    app_state.station_routes = {}
-
-    # Fetch once per unique station, then broadcast to all its rows (AC, DC, etc.)
+    # Prepare targets for batch parallel fetching
+    fetch_targets = []
     for sid in top_station_ids:
         rows_mask = station_stats['Station ID'] == sid
         sample = station_stats.loc[rows_mask].iloc[0]
-        result = fetch_mapbox_route(user_lat, user_lon, sample['Latitude'], sample['Longitude'])
-        if result:
-            dist_km, dur_hrs, coords = result
-            station_stats.loc[rows_mask, 'distance_to_user'] = dist_km
-            station_stats.loc[rows_mask, 'drive_time_hours'] = dur_hrs
-            app_state.station_routes[normalize_sid(sid)] = coords
-        # else: keep Haversine fallback values already in station_stats
+        fetch_targets.append((sid, sample['Latitude'], sample['Longitude']))
 
-    # For rows NOT in the top-10 stations, estimate drive time from Haversine
+    batch_routes = fetch_mapbox_routes_batch(user_lat, user_lon, fetch_targets)
+
+    for sid, (dist_km, dur_hrs, coords) in batch_routes.items():
+        rows_mask = station_stats['Station ID'] == sid
+        station_stats.loc[rows_mask, 'distance_to_user'] = dist_km
+        station_stats.loc[rows_mask, 'drive_time_hours'] = dur_hrs
+        app_state.station_routes[normalize_sid(sid)] = coords
+
+    # For rows NOT in the top-15 stations, estimate drive time from Haversine
     non_top_mask = ~station_stats['Station ID'].isin(top_station_ids)
     station_stats.loc[non_top_mask, 'drive_time_hours'] = (
         station_stats.loc[non_top_mask, 'distance_to_user'] / 50.0
@@ -300,43 +330,40 @@ def simulation_engine(stations_df, current_hour, user_lat, user_lon, max_range_k
 
     result_df = pd.DataFrame(merged)
 
-    # 9. Backfill routes — loop until the fastest/closest winners both have
-    #    Mapbox routes.  Each iteration may update a station's road distance
-    #    (always longer than Haversine), which can shift the winners, so we
-    #    keep going until stable (max 10 rounds to avoid infinite loops).
+    # 9. Backfill routes — batch fetch missing winner routes concurrently
     for _round in range(10):
         candidates = select_winners(result_df)
         if candidates.empty:
             break
 
-        # Check if all current winners already have routes
         needs_fetch = [
-            cand for _, cand in candidates.iterrows()
-            if normalize_sid(cand['Station ID']) not in app_state.station_routes
+            (row['Station ID'], row['Latitude'], row['Longitude'])
+            for _, row in candidates.iterrows()
+            if normalize_sid(row['Station ID']) not in app_state.station_routes
         ]
         if not needs_fetch:
-            break  # All winners have road routes — done
+            break
 
-        for cand in needs_fetch:
-            sid = cand['Station ID']
-            result = fetch_mapbox_route(user_lat, user_lon, cand['Latitude'], cand['Longitude'])
-            if result:
-                road_dist_km, new_drive_time, coords = result
+        routes_dict = fetch_mapbox_routes_batch(user_lat, user_lon, needs_fetch)
+        if not routes_dict:
+            break
+
+        for sid, (road_dist_km, new_drive_time, coords) in routes_dict.items():
+            app_state.station_routes[normalize_sid(sid)] = coords
+            result_df = update_station_road_metrics(result_df, sid, road_dist_km, new_drive_time)
+
+    # 10. Final Guarantee
+    final_winners = select_winners(result_df)
+    if not final_winners.empty:
+        needs_fetch = [
+            (row['Station ID'], row['Latitude'], row['Longitude'])
+            for _, row in final_winners.iterrows()
+            if normalize_sid(row['Station ID']) not in app_state.station_routes
+        ]
+        if needs_fetch:
+            routes_dict = fetch_mapbox_routes_batch(user_lat, user_lon, needs_fetch)
+            for sid, (road_dist_km, new_drive_time, coords) in routes_dict.items():
                 app_state.station_routes[normalize_sid(sid)] = coords
                 result_df = update_station_road_metrics(result_df, sid, road_dist_km, new_drive_time)
 
-    # 10. Final Guarantee: If the loop terminated but the final winners still
-    #     don't have Mapbox routes (e.g. hit the 10-round limit), fetch them now.
-    final_winners = select_winners(result_df)
-    if not final_winners.empty:
-        for _, cand in final_winners.iterrows():
-            sid = cand['Station ID']
-            if normalize_sid(sid) not in app_state.station_routes:
-                result = fetch_mapbox_route(user_lat, user_lon, cand['Latitude'], cand['Longitude'])
-                if result:
-                    road_dist_km, new_drive_time, coords = result
-                    app_state.station_routes[normalize_sid(sid)] = coords
-                    result_df = update_station_road_metrics(result_df, sid, road_dist_km, new_drive_time)
-
     return result_df
-
